@@ -73,6 +73,8 @@ static void uart_putc(char thebyte) {
 	if (thebyte == '\n')
 		uart_putc('\r');
 
+	uint32_t save = VIC_DisableIRQ();
+
 	//The following is done blocking. This means when you call printf() with lots of data,
 	//it relies on the ability of the interrupt to drain the txbuf, otherwise the system
 	//will lock up.
@@ -87,6 +89,8 @@ static void uart_putc(char thebyte) {
 		U0THR = get_from_circ_buf(&txbuf);
 		U0IER |= 1<<1;
 	}
+
+	VIC_RestoreIRQ( save );
 
 }
 
