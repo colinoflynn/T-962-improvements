@@ -30,7 +30,7 @@
 /* Size of buffer. The putchar function used here will block when the buffer is full (buffer is drained in interrupt),
  * so if you want to continously write lots of data increase the buffer size. Change putchar() to non-blocking and read
  * the 'dropped' parameter in the buffer structure to determine how your buffer size is doing. */
-#define CIRCBUFSIZE 256
+#define CIRCBUFSIZE 128
 
 /* The following baud rates assume a 55.296MHz system clock */
 #ifdef SERIAL_2MBs
@@ -47,7 +47,7 @@
 /* Settings for 230kbps */
 #define BAUD_M  1
 #define BAUD_D  0
-#define BAUD_DL 15
+#define BAUD_DL 104 /*15*/
 #endif
 
 typedef struct {
@@ -87,6 +87,7 @@ static void uart_putc(char thebyte) {
 		U0THR = get_from_circ_buf(&txbuf);
 		U0IER |= 1<<1;
 	}
+
 }
 
 //Blindly read character, assuming we knew one was available
@@ -122,13 +123,27 @@ static void __attribute__ ((interrupt ("IRQ"))) Serial_IRQHandler( void ) {
 	}
 
 	// RDA Interrupt
-	if (intsrc == 0b00000100) {
+	else if (intsrc == 0b00000100) {
 		//Don't block, as we are inside an interrupt!
 		add_to_circ_buf(&rxbuf, U0RBR, 0);
 	}
 
 	// ACK IRQ with VIC as the last thing
 	VICVectAddr = 0;
+}
+
+static void __attribute__ ((interrupt ("IRQ"))) Default_IRQHandler( void )
+{
+	int buf;
+	//Reading the FIFO
+	while (U0LSR & 0x01){
+		buf=U0RBR;
+	}
+
+	VICVectAddr=0;
+
+	//Avoid warnings
+	buf=buf;
 }
 
 void Serial_Init(void) {
@@ -143,7 +158,7 @@ void Serial_Init(void) {
 	U0FDR = ((BAUD_M)<<4) | ((BAUD_D)<<0);
 	U0LCR = 0x83; // 8N1 + enable divisor loading
 	U0DLL = BAUD_DL;
-	U0DLM = 0;
+	U0DLM = 1;//0
 	U0LCR &= ~0x80; // Divisor load done
 #ifdef __NEWLIB__
 	setbuf(stdout, NULL); // Needed to get rid of default line-buffering in newlib not present in redlib
@@ -151,6 +166,7 @@ void Serial_Init(void) {
 
 	VIC_RegisterHandler( VIC_UART0, Serial_IRQHandler );
 	VIC_EnableHandler( VIC_UART0 );
+	VICDefVectAddr=(unsigned long)Default_IRQHandler;
 
 	// Enable RX interrupt
 	U0IER |= 1<<0;
@@ -167,6 +183,12 @@ static void init_circ_buf(tcirc_buf *cbuf)
 
 static void add_to_circ_buf(tcirc_buf *cbuf, char ch, int block)
 {
+	//Disable interrupts now
+	uint32_t save = VIC_DisableIRQ();
+
+	//Blocking not supported
+	block = 0;
+
     // Add char to buffer
     unsigned int newhead = cbuf->head;
     newhead++;
@@ -177,35 +199,42 @@ static void add_to_circ_buf(tcirc_buf *cbuf, char ch, int block)
         if (!block)
         {
             cbuf->dropped++;
+            VIC_RestoreIRQ( save );
             return;
         }
 
-        //If blocking, this just keeps looping. Due to interrupt-driven
-        //system the buffer might eventually have space in it, however
-        //if this is called when interrupts are disabled it will stall
-        //the system, so the caller is cautioned not to fsck it up.
+        //TODO: To support blocking, we need to have interrupts
+        //      enabled!
     }
 
     cbuf->buf[cbuf->head] = ch;
     cbuf->head = newhead;
+
+    VIC_RestoreIRQ( save );
 }
 
 
 static char get_from_circ_buf(tcirc_buf *cbuf)
 {
+	uint32_t save = VIC_DisableIRQ();
+
     // Get char from buffer
     // Be sure to check first that there is a char in buffer
     unsigned int newtail = cbuf->tail;
     uint8_t retval = cbuf->buf[newtail];
 
-    if (newtail == cbuf->head)
+    if (newtail == cbuf->head) {
+    	VIC_RestoreIRQ( save );
         return 0xFF;
+    }
 
     newtail++;
     if (newtail >= CIRCBUFSIZE)
         // Rollover
         newtail = 0;
     cbuf->tail = newtail;
+
+    VIC_RestoreIRQ( save );
 
     return retval;
 }
@@ -221,11 +250,13 @@ static int circ_buf_has_char(tcirc_buf *cbuf)
 static unsigned int circ_buf_count(tcirc_buf *cbuf)
 {
     int count;
+    uint32_t save = VIC_DisableIRQ();
 
     count = cbuf->head;
     count -= cbuf->tail;
     if (count < 0)
         count += CIRCBUFSIZE;
+    VIC_RestoreIRQ( save );
     return (unsigned int)count;
 }
 
